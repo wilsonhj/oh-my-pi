@@ -1557,6 +1557,11 @@ async function runLoopBody(
 						}
 						await emitHarmonyAudit(config, err, "abort_retry", harmonyRetryAttempt);
 						harmonyRetryAttempt++;
+						// The retry re-samples this turn. The previous turn may have ended with
+						// no tool calls (hasMoreToolCalls false, entered via queued steering), so
+						// keep the inner loop alive or it exits with the steering unanswered and
+						// the retry turn still open.
+						hasMoreToolCalls = true;
 						continue;
 					}
 				} finally {

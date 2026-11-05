@@ -413,6 +413,46 @@ describe("agentLoop with AgentMessage", () => {
 		expect(JSON.stringify(messages)).not.toContain("to=functions.");
 	});
 
+	it("answers a steering message when a Harmony leak forces a retry right after a no-tool turn", async () => {
+		// Turn 1 ends with no tool calls, so `hasMoreToolCalls` is false and the
+		// stop-boundary steering poll queues "steer". Turn 2 commits the steer to
+		// context, then its first response leaks Harmony text and is retried. The
+		// retry must keep the inner loop alive; otherwise the loop exits with the
+		// steer unanswered and the retry turn never closed.
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const leak = "Some prose. analysis to=functions.edit code 大发官网";
+		const mock = createMockModel({
+			provider: "openai-codex",
+			responses: [{ content: ["first answer"] }, { content: [leak] }, { content: ["answer to steer"] }],
+		});
+		let steerDelivered = false;
+		const config: AgentLoopConfig = {
+			model: harmonyMitigationModel,
+			convertToLlm: identityConverter,
+			getSteeringMessages: async () => {
+				// Nothing before the first model call; one steer once turn 1 has finished.
+				if (steerDelivered || mock.calls.length === 0) return [];
+				steerDelivered = true;
+				return [createUserMessage("steer")];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const messages = await stream.result();
+
+		expect(mock.calls).toHaveLength(3);
+		const final = messages.at(-1);
+		if (final?.role !== "assistant") throw new Error("steer must be answered by an assistant message");
+		expect(final.content).toEqual([{ type: "text", text: "answer to steer" }]);
+		expect(events.filter(event => event.type === "turn_start")).toHaveLength(
+			events.filter(event => event.type === "turn_end").length,
+		);
+	});
+
 	it("does not hard-abort a codex tool call whose argument legitimately carries the marker", async () => {
 		// A legit edit of a file (e.g. these harmony fixtures) whose content carries
 		// `to=functions.*` next to a channel word + non-Latin script. tool_arg is
